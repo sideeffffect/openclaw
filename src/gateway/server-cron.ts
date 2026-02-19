@@ -10,7 +10,7 @@ import { resolveStorePath } from "../config/sessions/paths.js";
 import { runCronIsolatedAgentTurn } from "../cron/isolated-agent.js";
 import { appendCronRunLog, resolveCronRunLogPath } from "../cron/run-log.js";
 import { CronService } from "../cron/service.js";
-import { resolveCronStorePath } from "../cron/store.js";
+import { resolveCronStorePath, resolveJobsDir } from "../cron/store.js";
 import { normalizeHttpWebhookUrl } from "../cron/webhook-url.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { runHeartbeatOnce } from "../infra/heartbeat-runner.js";
@@ -72,6 +72,7 @@ export function buildGatewayCronService(params: {
 }): GatewayCronState {
   const cronLogger = getChildLogger({ module: "cron" });
   const storePath = resolveCronStorePath(params.cfg.cron?.store);
+  const jobsDir = resolveJobsDir(params.cfg.cron?.storeDir);
   const cronEnabled = process.env.OPENCLAW_SKIP_CRON !== "1" && params.cfg.cron?.enabled !== false;
 
   const resolveCronAgent = (requested?: string | null) => {
@@ -153,6 +154,7 @@ export function buildGatewayCronService(params: {
 
   const cron = new CronService({
     storePath,
+    jobsDir,
     cronEnabled,
     cronConfig: params.cfg.cron,
     defaultAgentId,

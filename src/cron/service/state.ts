@@ -34,6 +34,8 @@ export type CronServiceDeps = {
   nowMs?: () => number;
   log: Logger;
   storePath: string;
+  /** Optional jobs.d/ directory — job declarations loaded read-only at startup. */
+  jobsDir?: string;
   cronEnabled: boolean;
   /** CronConfig for session retention settings. */
   cronConfig?: CronConfig;
@@ -91,6 +93,12 @@ export type CronServiceState = {
   warnedDisabled: boolean;
   storeLoadedAtMs: number | null;
   storeFileMtimeMs: number | null;
+  /**
+   * Maps job id → the jobs.d/ file it was loaded from. Jobs not in this map
+   * are persisted to jobs.json; jobs in this map are written back to their
+   * source file on every persist call.
+   */
+  dirSourceFiles: Map<string, string>;
 };
 
 export function createCronServiceState(deps: CronServiceDeps): CronServiceState {
@@ -103,6 +111,7 @@ export function createCronServiceState(deps: CronServiceDeps): CronServiceState 
     warnedDisabled: false,
     storeLoadedAtMs: null,
     storeFileMtimeMs: null,
+    dirSourceFiles: new Map(),
   };
 }
 

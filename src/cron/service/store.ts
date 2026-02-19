@@ -7,7 +7,7 @@ import {
 import { parseAbsoluteTimeMs } from "../parse.js";
 import { migrateLegacyCronPayload } from "../payload-migration.js";
 import { normalizeCronStaggerMs, resolveDefaultCronStaggerMs } from "../stagger.js";
-import { loadCronStore, saveCronStore } from "../store.js";
+import { loadCronStore, loadJobsDir, saveCronStore, saveJobFile } from "../store.js";
 import type { CronJob } from "../types.js";
 import { recomputeNextRuns } from "./jobs.js";
 import { inferLegacyName, normalizeOptionalText } from "./normalize.js";
@@ -241,6 +241,54 @@ export async function ensureLoaded(
   const loaded = await loadCronStore(state.deps.storePath);
   const jobs = (loaded.jobs ?? []) as unknown as Array<Record<string, unknown>>;
   let mutated = false;
+
+  // On every (re)load, rebuild dirSourceFiles from scratch.
+  state.dirSourceFiles.clear();
+
+  // Merge declarative jobs from storeDir (jobs.d/ pattern) if configured.
+  // Each dir file is the authoritative store for its job: config AND runtime
+  // state are written back to the source file on persist. The jobs.json store
+  // only contains jobs that were not loaded from a dir file.
+  if (state.deps.jobsDir) {
+    const entries = await loadJobsDir(state.deps.jobsDir);
+    if (entries.length > 0) {
+      // Build an index of existing jobs.json jobs by ID for O(1) lookup.
+      const jobsById = new Map<string, number>();
+      for (let i = 0; i < jobs.length; i++) {
+        const id = jobs[i].id;
+        if (typeof id === "string" && id) {
+          jobsById.set(id, i);
+        }
+      }
+      for (const { job: dirJob, filePath } of entries) {
+        const dirJobRaw = dirJob as unknown as Record<string, unknown>;
+        const id = typeof dirJobRaw.id === "string" && dirJobRaw.id ? dirJobRaw.id : undefined;
+        if (id !== undefined && jobsById.has(id)) {
+          // Job exists in jobs.json: overlay dir file's fields (which may
+          // include updated config) onto the existing record. Runtime state
+          // from the dir file takes precedence since the dir file is
+          // authoritative for this job going forward.
+          const idx = jobsById.get(id)!;
+          Object.assign(jobs[idx], dirJobRaw);
+          // Remove from jobs.json array — this job now lives in the dir file.
+          jobs.splice(idx, 1);
+          // Rebuild index after splice.
+          jobsById.clear();
+          for (let i = 0; i < jobs.length; i++) {
+            const jid = jobs[i].id;
+            if (typeof jid === "string" && jid) jobsById.set(jid, i);
+          }
+        }
+        // Append dir job to the in-memory list and record its source.
+        jobs.push(dirJobRaw);
+        if (id !== undefined) {
+          state.dirSourceFiles.set(id, filePath);
+        }
+        mutated = true;
+      }
+    }
+  }
+
   for (const raw of jobs) {
     const state = raw.state;
     if (!state || typeof state !== "object" || Array.isArray(state)) {
@@ -490,7 +538,34 @@ export async function persist(state: CronServiceState) {
   if (!state.store) {
     return;
   }
-  await saveCronStore(state.deps.storePath, state.store);
-  // Update file mtime after save to prevent immediate reload
+
+  // Split jobs by their authoritative store: dir-managed jobs go back to
+  // their source file; all other jobs go to jobs.json.
+  const jsonJobs: typeof state.store.jobs = [];
+  const dirJobs: Array<{ job: (typeof state.store.jobs)[number]; filePath: string }> = [];
+
+  for (const job of state.store.jobs) {
+    const filePath = state.dirSourceFiles.get(job.id);
+    if (filePath) {
+      dirJobs.push({ job, filePath });
+    } else {
+      jsonJobs.push(job);
+    }
+  }
+
+  // Write non-dir jobs to jobs.json.
+  await saveCronStore(state.deps.storePath, { version: 1, jobs: jsonJobs });
   state.storeFileMtimeMs = await getFileMtimeMs(state.deps.storePath);
+
+  // Write each dir-managed job back to its source file.
+  for (const { job, filePath } of dirJobs) {
+    try {
+      await saveJobFile(filePath, job);
+    } catch (err) {
+      state.deps.log.warn(
+        { jobId: job.id, filePath, err: String(err) },
+        "cron: failed to write job back to storeDir file; changes may be lost on restart",
+      );
+    }
+  }
 }
